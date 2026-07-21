@@ -1,7 +1,13 @@
 {
+  "enabled": false,
+  "activeMode": "basic",
+  "currentProject": "",
   "attachmentFolder": "attachments/evidence",
   "evidencePrefix": "EV",
   "evidenceNumberPadding": 3,
+  "reconPrefix": "RC",
+  "reconInsertHeading": true,
+  "lastReconTarget": "",
   "imageMaxWidth": 0,
   "insertHeading": true,
   "insertCallout": true,

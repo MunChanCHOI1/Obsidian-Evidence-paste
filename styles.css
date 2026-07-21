@@ -11,6 +11,53 @@
 	resize: vertical;
 }
 
+/* Status-bar badge (browser-extension style state indicator). */
+.evidence-paste-statusbar {
+	cursor: pointer;
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35em;
+}
+
+.evidence-paste-statusbar.is-disabled {
+	opacity: 0.6;
+}
+
+.evidence-paste-statusbar .evidence-paste-status-icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.evidence-paste-statusbar .evidence-paste-status-icon svg {
+	width: var(--icon-s, 16px);
+	height: var(--icon-s, 16px);
+}
+
+/* Paste-time prompt modal (기본/정찰 입력). */
+.evidence-paste-prompt .evidence-paste-prompt-input {
+	width: 100%;
+}
+
+.evidence-paste-prompt textarea.evidence-paste-prompt-input {
+	font-family: var(--font-monospace);
+	resize: vertical;
+}
+
+/* Redaction editor modal. */
+.evidence-paste-redact-canvas {
+	display: block;
+	max-width: 100%;
+	max-height: 60vh;
+	width: auto;
+	height: auto;
+	margin: 0.5em auto;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	cursor: crosshair;
+	touch-action: none;
+}
+
 .evidence-paste-preview {
 	max-height: 320px;
 	overflow: auto;

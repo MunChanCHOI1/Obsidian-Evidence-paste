@@ -13,14 +13,20 @@ import {
 	isSupportedImageMime,
 	supportedMimeList,
 } from "../utils/mime";
-import { nextEvidenceIds } from "../evidence/evidence-id";
 import {
 	buildImageFileName,
 	formatTimestamp,
 	formatDisplayTimestamp,
 	resolveUniquePath,
 } from "../evidence/file-naming";
-import { renderEvidenceBlock } from "../evidence/template-renderer";
+import {
+	RECON_CALLOUT_TYPE,
+	detectPayloadKind,
+	renderBasicBlock,
+	renderEvidenceBlock,
+	renderPayloadBlock,
+	renderReconBlock,
+} from "../evidence/template-renderer";
 import { generateId } from "../utils/id";
 import {
 	ExtractedImage,
@@ -28,19 +34,39 @@ import {
 	extractImagesFromClipboard,
 } from "./clipboard-image";
 import { insertBlockAtCursor } from "./evidence-inserter";
+import { promptFields } from "../ui/mode-input-modal";
+import { redactImage } from "../ui/redaction-modal";
+
+/** Bytes ready to persist: either the original image or a redacted PNG. */
+interface ImageBytes {
+	buffer: ArrayBuffer;
+	mime: string;
+}
+
+const PENDING = "직접 작성 필요";
+
+interface SavedImage {
+	targetPath: string;
+	imageName: string;
+	now: Date;
+}
 
 /*
  * Orchestrates the paste -> save -> insert flow.
  *
- * Detect an image paste, save the image binary to the attachment folder with
- * an evidence-numbered file name, and insert the rendered evidence block
- * (heading + embed + description callout) at the cursor. There is no AI: the
- * callout fields are inserted as "직접 작성 필요" placeholders for the user to fill.
+ * Behaves like a browser extension:
+ *   - The MASTER switch (settings.enabled) decides whether image pastes are
+ *     intercepted at all. When off, we never call preventDefault(): Obsidian's
+ *     native paste runs untouched.
+ *   - The ACTIVE MODE decides what gets inserted:
+ *       · evidence(증적): full structured callout (unchanged spec).
+ *       · recon(정찰):   light callout (대상 / 도구·명령 / 발견) from a paste-time modal.
+ *       · basic(기본):    image embed + optional one-line caption from a paste-time modal.
  *
- * Data-safety principle: we only call preventDefault() AFTER we have confirmed
- * that the clipboard actually contains image data (File objects already
- * extracted and held in memory). A plain-text paste returns early and lets
- * Obsidian handle it normally.
+ * Data-safety principle: we only call preventDefault() AFTER confirming the
+ * clipboard actually contains image data. Plain-text pastes return early.
+ * For the modal modes, the image is written to disk only after the user
+ * confirms the modal, so cancelling leaves nothing behind.
  */
 export class PasteHandler {
 	constructor(private readonly plugin: EvidencePastePlugin) {}
@@ -51,13 +77,34 @@ export class PasteHandler {
 		editor: Editor,
 		info: MarkdownView | MarkdownFileInfo
 	): void {
+		// Master switch off -> do not interfere with any paste at all.
+		if (!this.plugin.settings.enabled) {
+			return;
+		}
+
 		// Extract synchronously; clipboard data is not usable after this returns.
 		const images = extractImagesFromClipboard(evt.clipboardData);
 
-		// Diagnostic: one line per paste. If this prints TWICE for a single
-		// paste, the event handler is registered more than once (duplicate
-		// plugin load). If it prints once but shows >1 image for a single
-		// screenshot, the clipboard exposed multiple renditions.
+		// Payload mode is the one text-first mode: capture a text paste (an HTTP
+		// request/response, an injection string, tool output). Read the text
+		// synchronously too, before the event's clipboardData goes stale.
+		if (this.plugin.settings.activeMode === "payload") {
+			const text = evt.clipboardData?.getData("text/plain") ?? "";
+			if (text.trim().length > 0) {
+				evt.preventDefault();
+				void this.processPayload(text, editor).catch((err) => {
+					logError("payload paste failed", err);
+					new Notice(`붙여넣기 실패: ${errorMessage(err)}`);
+				});
+				return;
+			}
+			// No text but an image was pasted -> preserve it as a basic embed
+			// rather than dropping it; otherwise fall through to the default.
+			if (images.length === 0) {
+				return;
+			}
+		}
+
 		logInfo(
 			`paste -> ${describeClipboard(evt.clipboardData)} => ${images.length} image(s)`
 		);
@@ -72,21 +119,28 @@ export class PasteHandler {
 
 		void this.processImages(images, editor, info).catch((err) => {
 			logError("paste processing failed", err);
-			new Notice(`증적 붙여넣기 실패: ${errorMessage(err)}`);
+			new Notice(`붙여넣기 실패: ${errorMessage(err)}`);
 		});
 	}
 
-	/** Async pipeline: validate, save each image, insert markdown. */
+	/** Validate, then dispatch to the active mode's pipeline. */
 	private async processImages(
 		images: ExtractedImage[],
 		editor: Editor,
 		info: MarkdownView | MarkdownFileInfo
 	): Promise<void> {
-		const settings = this.plugin.settings;
-
 		const file = info.file ?? this.plugin.app.workspace.getActiveFile();
 		if (!file) {
 			throw new EvidencePasteError("활성 Markdown 파일이 없습니다.");
+		}
+
+		// Per-project image folder: ensure a project is chosen before saving.
+		if (this.plugin.settings.currentProject.trim().length === 0) {
+			const project = await this.plugin.ensureProject();
+			if (project === null) {
+				new Notice("프로젝트가 지정되지 않아 붙여넣기를 취소했습니다.");
+				return;
+			}
 		}
 
 		const supported = images.filter((img) => isSupportedImageMime(img.mime));
@@ -99,64 +153,286 @@ export class PasteHandler {
 			return;
 		}
 
-		await this.ensureFolder(settings.attachmentFolder);
+		switch (this.plugin.settings.activeMode) {
+			case "recon":
+				await this.processRecon(supported, unsupportedCount, editor);
+				return;
+			case "basic":
+			// Payload mode is text-first; an image pasted while it is active is
+			// preserved as a basic embed rather than being dropped.
+			case "payload":
+				await this.processBasic(supported, unsupportedCount, editor);
+				return;
+			case "evidence":
+			default:
+				await this.processEvidence(supported, unsupportedCount, editor);
+				return;
+		}
+	}
 
-		// Compute all evidence ids up front so multi-image pastes get a clean
-		// sequential run even though each insert mutates the note.
-		const content = editor.getValue();
-		const ids = nextEvidenceIds(
-			content,
+	/* ---------------- 증적 (evidence) — unchanged spec ---------------- */
+	private async processEvidence(
+		supported: ExtractedImage[],
+		unsupportedCount: number,
+		editor: Editor
+	): Promise<void> {
+		const settings = this.plugin.settings;
+		await this.ensureImageFolder();
+
+		const ids = await this.plugin.allocateIds(
+			editor.getValue(),
 			settings.evidencePrefix,
-			settings.evidenceNumberPadding,
 			supported.length
 		);
 
 		let savedCount = 0;
 		for (let i = 0; i < supported.length; i++) {
-			const image = supported[i];
-			const evidenceId = ids[i];
-			const ext = extensionForMime(image.mime);
-			if (!ext) {
-				// Should not happen (already filtered), but stay defensive.
+			const bytes = await this.resolveImageBytes(supported[i]);
+			if (!bytes) {
+				continue; // user skipped this image in the redaction editor
+			}
+			const saved = await this.saveImage(bytes, ids[i]);
+			if (!saved) {
 				continue;
 			}
-
-			const buffer = await image.file.arrayBuffer();
-			const now = new Date();
-			const timestamp = formatTimestamp(now);
-			const fileName = buildImageFileName(evidenceId, timestamp, ext);
-			const targetPath = await resolveUniquePath(
-				settings.attachmentFolder,
-				fileName,
-				(p) => this.plugin.app.vault.adapter.exists(normalizePath(p))
-			);
-
-			await this.plugin.app.vault.createBinary(
-				normalizePath(targetPath),
-				buffer
-			);
-
-			const imageName = targetPath.slice(targetPath.lastIndexOf("/") + 1);
 			const markdown = renderEvidenceBlock({
-				evidenceId,
-				imagePath: targetPath,
-				imageName,
+				evidenceId: ids[i],
+				imagePath: saved.targetPath,
+				imageName: saved.imageName,
 				imageMaxWidth: settings.imageMaxWidth,
-				timestamp: formatDisplayTimestamp(now),
+				timestamp: formatDisplayTimestamp(saved.now),
 				calloutType: settings.calloutType,
 				insertHeading: settings.insertHeading,
 				insertCallout: settings.insertCallout,
 				includeImage: true,
 				customTemplate: settings.markdownTemplate,
 				placeholderId: generateId(),
-				pending: "직접 작성 필요",
+				pending: PENDING,
 			});
 			insertBlockAtCursor(editor, markdown);
-
 			savedCount++;
-			new Notice(`${evidenceId} 이미지 저장 완료`);
+			new Notice(`${ids[i]} 이미지 저장 완료`);
 		}
 
+		this.reportUnsupported(savedCount, unsupportedCount);
+	}
+
+	/* ---------------- 정찰 (recon) — light, modal-driven ---------------- */
+	private async processRecon(
+		supported: ExtractedImage[],
+		unsupportedCount: number,
+		editor: Editor
+	): Promise<void> {
+		const settings = this.plugin.settings;
+
+		const input = await promptFields(this.plugin.app, {
+			title: "정찰 기록",
+			submitText: "삽입",
+			fields: [
+				{ key: "target", label: "대상", value: settings.lastReconTarget, placeholder: "host / IP / URL (예: 10.0.0.5, target.local)" },
+				{ key: "command", label: "도구·명령", placeholder: "실행한 명령 한 줄 (예: nmap -sV 10.0.0.5)" },
+				{ key: "finding", label: "발견", placeholder: "열린 포트 / 서비스 / 서브도메인 등", multiline: true },
+			],
+		});
+		if (input === null) {
+			new Notice("정찰 붙여넣기 취소됨");
+			return;
+		}
+
+		// Remember 대상 so it pre-fills as the default next time (still editable).
+		const target = input.target.trim();
+		if (target.length > 0 && target !== settings.lastReconTarget) {
+			settings.lastReconTarget = target;
+			await this.plugin.saveSettings();
+		}
+
+		await this.ensureImageFolder();
+		const ids = await this.plugin.allocateIds(
+			editor.getValue(),
+			settings.reconPrefix,
+			supported.length
+		);
+
+		let savedCount = 0;
+		for (let i = 0; i < supported.length; i++) {
+			const bytes = await this.resolveImageBytes(supported[i]);
+			if (!bytes) {
+				continue; // user skipped this image in the redaction editor
+			}
+			const saved = await this.saveImage(bytes, ids[i]);
+			if (!saved) {
+				continue;
+			}
+			const markdown = renderReconBlock({
+				reconId: ids[i],
+				imagePath: saved.targetPath,
+				imageName: saved.imageName,
+				imageMaxWidth: settings.imageMaxWidth,
+				insertHeading: settings.reconInsertHeading,
+				includeImage: true,
+				calloutType: RECON_CALLOUT_TYPE,
+				target: input.target,
+				command: input.command,
+				finding: input.finding,
+				pending: PENDING,
+				placeholderId: generateId(),
+			});
+			insertBlockAtCursor(editor, markdown);
+			savedCount++;
+			new Notice(`${ids[i]} 정찰 기록 저장 완료`);
+		}
+
+		this.reportUnsupported(savedCount, unsupportedCount);
+	}
+
+	/* ---------------- 기본 (basic) — image + caption ---------------- */
+	private async processBasic(
+		supported: ExtractedImage[],
+		unsupportedCount: number,
+		editor: Editor
+	): Promise<void> {
+		const settings = this.plugin.settings;
+
+		const input = await promptFields(this.plugin.app, {
+			title: "이미지 붙여넣기",
+			submitText: "삽입",
+			fields: [
+				{ key: "caption", label: "캡션", placeholder: "이미지 설명 (비워두면 캡션 없음)" },
+			],
+		});
+		if (input === null) {
+			new Notice("이미지 붙여넣기 취소됨");
+			return;
+		}
+
+		await this.ensureImageFolder();
+
+		let savedCount = 0;
+		for (let i = 0; i < supported.length; i++) {
+			const bytes = await this.resolveImageBytes(supported[i]);
+			if (!bytes) {
+				continue; // user skipped this image in the redaction editor
+			}
+			const saved = await this.saveImage(bytes, "IMG");
+			if (!saved) {
+				continue;
+			}
+			const markdown = renderBasicBlock({
+				imagePath: saved.targetPath,
+				imageName: saved.imageName,
+				imageMaxWidth: settings.imageMaxWidth,
+				includeImage: true,
+				caption: input.caption,
+			});
+			insertBlockAtCursor(editor, markdown);
+			savedCount++;
+		}
+		new Notice(`이미지 ${savedCount}개 붙여넣기 완료`);
+
+		this.reportUnsupported(savedCount, unsupportedCount);
+	}
+
+	/* ---------------- 페이로드 (payload) — text-first, no image ---------------- */
+	private async processPayload(text: string, editor: Editor): Promise<void> {
+		const settings = this.plugin.settings;
+
+		// Keep numbering project-scoped even though nothing is written to disk.
+		if (settings.currentProject.trim().length === 0) {
+			const project = await this.plugin.ensureProject();
+			if (project === null) {
+				new Notice("프로젝트가 지정되지 않아 붙여넣기를 취소했습니다.");
+				return;
+			}
+		}
+
+		const kind = detectPayloadKind(text);
+		const input = await promptFields(this.plugin.app, {
+			title: "페이로드 기록",
+			submitText: "삽입",
+			fields: [
+				{ key: "target", label: "대상", value: settings.lastReconTarget, placeholder: "host / IP / URL / 엔드포인트" },
+				{ key: "label", label: "설명·맥락", placeholder: "이 페이로드의 목적/결과 (선택)", multiline: true },
+			],
+		});
+		if (input === null) {
+			new Notice("페이로드 붙여넣기 취소됨");
+			return;
+		}
+
+		// Remember 대상 so it pre-fills next time (shared with recon mode).
+		const target = input.target.trim();
+		if (target.length > 0 && target !== settings.lastReconTarget) {
+			settings.lastReconTarget = target;
+			await this.plugin.saveSettings();
+		}
+
+		const [payloadId] = await this.plugin.allocateIds(
+			editor.getValue(),
+			settings.payloadPrefix,
+			1
+		);
+		const markdown = renderPayloadBlock({
+			payloadId,
+			insertHeading: settings.payloadInsertHeading,
+			calloutType: settings.payloadCalloutType,
+			target: input.target,
+			label: input.label,
+			payloadText: text,
+			kind,
+			timestamp: formatDisplayTimestamp(new Date()),
+			pending: PENDING,
+			placeholderId: generateId(),
+		});
+		insertBlockAtCursor(editor, markdown);
+		new Notice(`${payloadId} 페이로드 기록 완료`);
+	}
+
+	/* ---------------- shared helpers ---------------- */
+
+	/**
+	 * Turn a pasted image into the bytes to persist. With redaction enabled the
+	 * user first blacks out secrets/PII in an editor; returns null when they
+	 * cancel that editor, so the caller skips the image entirely. Without
+	 * redaction the original bytes pass through unchanged.
+	 */
+	private async resolveImageBytes(image: ExtractedImage): Promise<ImageBytes | null> {
+		if (!this.plugin.settings.redactOnPaste) {
+			return { buffer: await image.file.arrayBuffer(), mime: image.mime };
+		}
+		return redactImage(this.plugin.app, image.file);
+	}
+
+	/** Create the current project's image folder (public; used by the plugin). */
+	async ensureImageFolder(): Promise<void> {
+		await this.ensureFolder(this.plugin.imageFolder());
+	}
+
+	/**
+	 * Save resolved image bytes to the attachment folder under a unique
+	 * `<baseId>_<timestamp>.<ext>` name. Returns null if the MIME has no
+	 * known extension (already filtered upstream, but kept defensive).
+	 */
+	private async saveImage(
+		bytes: ImageBytes,
+		baseId: string
+	): Promise<SavedImage | null> {
+		const ext = extensionForMime(bytes.mime);
+		if (!ext) {
+			return null;
+		}
+		const now = new Date();
+		const fileName = buildImageFileName(baseId, formatTimestamp(now), ext);
+		const targetPath = await resolveUniquePath(
+			this.plugin.imageFolder(),
+			fileName,
+			(p) => this.plugin.app.vault.adapter.exists(normalizePath(p))
+		);
+		await this.plugin.app.vault.createBinary(normalizePath(targetPath), bytes.buffer);
+		const imageName = targetPath.slice(targetPath.lastIndexOf("/") + 1);
+		return { targetPath, imageName, now };
+	}
+
+	private reportUnsupported(savedCount: number, unsupportedCount: number): void {
 		if (unsupportedCount > 0) {
 			new Notice(
 				`이미지 ${savedCount}개 저장, 지원하지 않는 형식 ${unsupportedCount}개는 건너뜀`
@@ -197,8 +473,7 @@ export class PasteHandler {
 	}
 
 	/**
-	 * Shared helper (also used by the "Paste image as evidence" command in a
-	 * later stage): resolve the active file for a given editor/info.
+	 * Resolve the active file for a given editor/info.
 	 */
 	resolveActiveFile(info?: MarkdownView | MarkdownFileInfo): TFile | null {
 		return info?.file ?? this.plugin.app.workspace.getActiveFile();

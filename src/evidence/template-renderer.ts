@@ -14,7 +14,7 @@
  * fenced code block, preserved verbatim.
  */
 
-import { toSafeFencedBlock } from "../utils/markdown";
+import { sanitizeScalar, toSafeFencedBlock } from "../utils/markdown";
 
 export interface EvidenceRenderContext {
 	evidenceId: string;
@@ -173,4 +173,227 @@ export function renderEvidenceBlock(ctx: EvidenceRenderContext): string {
 		includeImage: ctx.includeImage,
 	});
 	return renderTemplate(defaultTemplate, vars).trim();
+}
+
+/* ------------------------------------------------------------------ *
+ * 정찰 (recon) mode — a lighter, information-gathering block.
+ *
+ * Same visual family as the evidence callout but only three fields:
+ *   대상 (target host/IP/URL), 도구·명령 (the command run), 발견 (what was found).
+ * The command is emitted as a fence-safe code block; the two prose fields ride
+ * on callout lines with continuation-line re-prefixing, exactly like evidence.
+ * ------------------------------------------------------------------ */
+
+/** Default callout keyword for recon blocks (built-in blue "info" style). */
+export const RECON_CALLOUT_TYPE = "info";
+
+export interface ReconRenderContext {
+	reconId: string;
+	imagePath: string;
+	imageName: string;
+	imageMaxWidth: number;
+	insertHeading: boolean;
+	includeImage: boolean;
+	/** Callout keyword; empty -> RECON_CALLOUT_TYPE. */
+	calloutType: string;
+	/** 대상 (host / IP / URL). */
+	target: string;
+	/** 도구·명령 (the tool/command that was run). */
+	command: string;
+	/** 발견 (open ports / services / subdomains / notes). */
+	finding: string;
+	/** Placeholder used for any field left blank (e.g. "직접 작성 필요"). */
+	pending: string;
+	placeholderId: string;
+}
+
+const RECON_HEADING_PART = "### 정찰 {{reconId}}";
+const RECON_CALLOUT_PART = [
+	"> [!{{calloutType}}]+ 정찰 {{reconId}}",
+	"> **대상**",
+	"> {{target}}",
+	">",
+	"> **도구·명령**",
+	"> {{commandBlock}}",
+	">",
+	"> **발견**",
+	"> {{finding}}",
+].join("\n");
+
+/** Substitution variables for a recon block. Blank fields fall back to `pending`. */
+export function buildReconVars(ctx: ReconRenderContext): Record<string, string> {
+	const target = sanitizeScalar(ctx.target) || ctx.pending;
+	const finding = sanitizeScalar(ctx.finding) || ctx.pending;
+	// Keep the command verbatim (payload-like); fence-safe wrap it.
+	const commandRaw = (ctx.command ?? "").replace(/\r\n?/g, "\n").replace(/[ \t]+$/gm, "").trim();
+	const command = commandRaw.length > 0 ? commandRaw : ctx.pending;
+
+	return {
+		reconId: ctx.reconId,
+		calloutType: ctx.calloutType || RECON_CALLOUT_TYPE,
+		imageEmbed: buildImageEmbed(ctx.imagePath, ctx.imageMaxWidth),
+		imagePath: ctx.imagePath,
+		imageName: ctx.imageName,
+		target,
+		command,
+		commandBlock: toSafeFencedBlock(command, "text"),
+		finding,
+		placeholderId: ctx.placeholderId,
+	};
+}
+
+/** Render the full recon block (optional heading + embed + light callout). */
+export function renderReconBlock(ctx: ReconRenderContext): string {
+	const vars = buildReconVars(ctx);
+	const parts: string[] = [];
+	if (ctx.insertHeading) {
+		parts.push(RECON_HEADING_PART);
+	}
+	if (ctx.includeImage) {
+		parts.push(EMBED_PART);
+	}
+	parts.push(RECON_CALLOUT_PART);
+	return renderTemplate(parts.join("\n\n"), vars).trim();
+}
+
+/* ------------------------------------------------------------------ *
+ * 페이로드 (payload) mode — capture a TEXT paste verbatim.
+ *
+ * Unlike the other modes there is no image: the clipboard text (an HTTP
+ * request/response, an injection string, tool output) is wrapped in a
+ * fence-safe code block inside a callout, alongside optional 대상 / 설명 prose.
+ * The fence language is chosen from a light HTTP sniff so Burp captures get
+ * syntax highlighting.
+ * ------------------------------------------------------------------ */
+
+/** Default callout keyword for payload blocks. */
+export const PAYLOAD_CALLOUT_TYPE = "payload";
+
+export type PayloadKind = "http-request" | "http-response" | "text";
+
+/** Korean label for a payload kind, used in the callout title. */
+export function payloadKindLabel(kind: PayloadKind): string {
+	switch (kind) {
+		case "http-request":
+			return "HTTP 요청";
+		case "http-response":
+			return "HTTP 응답";
+		default:
+			return "텍스트";
+	}
+}
+
+/**
+ * Sniff whether a pasted blob looks like an HTTP request or response by its
+ * first non-blank line. Deliberately conservative: anything unrecognized is
+ * plain "text" so nothing is mislabeled.
+ */
+export function detectPayloadKind(text: string): PayloadKind {
+	const firstLine = (text ?? "")
+		.replace(/^\s+/, "")
+		.split(/\r?\n/, 1)[0] ?? "";
+	if (/^HTTP\/\d(?:\.\d)?\s+\d{3}\b/.test(firstLine)) {
+		return "http-response";
+	}
+	if (/^(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|TRACE|CONNECT)\s+\S+\s+HTTP\/\d/.test(firstLine)) {
+		return "http-request";
+	}
+	return "text";
+}
+
+export interface PayloadRenderContext {
+	payloadId: string;
+	insertHeading: boolean;
+	/** Callout keyword; empty -> PAYLOAD_CALLOUT_TYPE. */
+	calloutType: string;
+	/** 대상 (host / IP / URL / endpoint); blank -> pending. */
+	target: string;
+	/** 설명·맥락 (why this payload matters); blank -> pending. */
+	label: string;
+	/** The raw pasted text, preserved verbatim in a fence-safe block. */
+	payloadText: string;
+	/** Detected kind; picks the fence language and title suffix. */
+	kind: PayloadKind;
+	/** Local capture timestamp (YYYY-MM-DD HH:mm:ss). */
+	timestamp: string;
+	/** Placeholder for blank fields. */
+	pending: string;
+	placeholderId: string;
+}
+
+const PAYLOAD_HEADING_PART = "### 페이로드 {{payloadId}}";
+const PAYLOAD_CALLOUT_PART = [
+	"> [!{{calloutType}}]+ 페이로드 {{payloadId}} — {{kindLabel}}",
+	"> **대상**",
+	"> {{target}}",
+	">",
+	"> **설명·맥락**",
+	"> {{label}}",
+	">",
+	"> **캡처 시각**",
+	"> {{timestamp}}",
+	">",
+	"> **원문**",
+	"> {{payloadBlock}}",
+].join("\n");
+
+/** Substitution variables for a payload block. Blank prose falls back to pending. */
+export function buildPayloadVars(ctx: PayloadRenderContext): Record<string, string> {
+	const target = sanitizeScalar(ctx.target) || ctx.pending;
+	const label = sanitizeScalar(ctx.label) || ctx.pending;
+	// Keep the payload verbatim; only normalize line endings before fencing.
+	const raw = (ctx.payloadText ?? "").replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+	const lang = ctx.kind === "text" ? "text" : "http";
+	return {
+		payloadId: ctx.payloadId,
+		calloutType: ctx.calloutType || PAYLOAD_CALLOUT_TYPE,
+		kindLabel: payloadKindLabel(ctx.kind),
+		target,
+		label,
+		timestamp: ctx.timestamp,
+		payloadBlock: toSafeFencedBlock(raw, lang),
+		placeholderId: ctx.placeholderId,
+	};
+}
+
+/** Render the full payload block (optional heading + callout, no image). */
+export function renderPayloadBlock(ctx: PayloadRenderContext): string {
+	const vars = buildPayloadVars(ctx);
+	const parts: string[] = [];
+	if (ctx.insertHeading) {
+		parts.push(PAYLOAD_HEADING_PART);
+	}
+	parts.push(PAYLOAD_CALLOUT_PART);
+	return renderTemplate(parts.join("\n\n"), vars).trim();
+}
+
+/* ------------------------------------------------------------------ *
+ * 기본 (basic) mode — just the image plus an optional one-line caption.
+ * No numbering, no callout. The caption renders italicized under the embed.
+ * ------------------------------------------------------------------ */
+
+export interface BasicRenderContext {
+	imagePath: string;
+	imageName: string;
+	imageMaxWidth: number;
+	includeImage: boolean;
+	/** Optional caption; blank -> caption line omitted. */
+	caption: string;
+}
+
+/** Render a basic image block: embed + optional `*caption*`. */
+export function renderBasicBlock(ctx: BasicRenderContext): string {
+	const embed = ctx.includeImage ? buildImageEmbed(ctx.imagePath, ctx.imageMaxWidth) : "";
+	const caption = sanitizeScalar(ctx.caption);
+	const parts: string[] = [];
+	if (embed.length > 0) {
+		parts.push(embed);
+	}
+	if (caption.length > 0) {
+		parts.push(`*${caption}*`);
+	}
+	if (parts.length === 0) {
+		parts.push(embed);
+	}
+	return parts.join("\n");
 }
