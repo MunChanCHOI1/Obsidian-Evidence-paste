@@ -1,0 +1,10 @@
+{
+  "attachmentFolder": "attachments/evidence",
+  "evidencePrefix": "EV",
+  "evidenceNumberPadding": 3,
+  "imageMaxWidth": 0,
+  "insertHeading": true,
+  "insertCallout": true,
+  "calloutType": "evidence",
+  "markdownTemplate": ""
+}

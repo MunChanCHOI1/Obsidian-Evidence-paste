@@ -1,0 +1,10 @@
+{
+	"id": "obsidian-evidence-paste",
+	"name": "Evidence Paste",
+	"version": "0.1.0",
+	"minAppVersion": "1.4.0",
+	"description": "Paste screenshots as security-report evidence: automatic file naming, evidence numbering, and description callouts, with optional local/cloud AI vision analysis.",
+	"author": "Donald",
+	"authorUrl": "",
+	"isDesktopOnly": true
+}

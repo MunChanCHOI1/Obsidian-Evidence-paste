@@ -1,0 +1,12 @@
+{
+	"//": "Cloud/no-dependency type-check config. Uses the local hand-written obsidian type stub in types/ so `tsc --noEmit` can run WITHOUT `npm install`. Do NOT use this for the real build; the real build (npm run build) uses tsconfig.json against the installed `obsidian` package.",
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"skipLibCheck": true,
+		"ignoreDeprecations": "6.0"
+	},
+	"include": [
+		"src/**/*.ts",
+		"types/**/*.d.ts"
+	]
+}

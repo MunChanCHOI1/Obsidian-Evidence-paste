@@ -1,0 +1,26 @@
+/* Evidence Paste plugin styles. */
+
+.evidence-paste-settings .setting-item-description code {
+	white-space: pre-wrap;
+}
+
+.evidence-paste-settings textarea.evidence-paste-template-input {
+	width: 100%;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	resize: vertical;
+}
+
+.evidence-paste-preview {
+	max-height: 320px;
+	overflow: auto;
+	padding: 0.75em 1em;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background: var(--background-secondary);
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+}

@@ -1,0 +1,30 @@
+{
+	"name": "obsidian-evidence-paste",
+	"version": "0.1.0",
+	"description": "Paste screenshots as security-report evidence in Obsidian.",
+	"main": "main.js",
+	"scripts": {
+		"dev": "node esbuild.config.mjs",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"check:cloud": "tsc --noEmit -p tsconfig.check.json",
+		"test": "tsx --test tests/*.test.ts",
+		"version": "node version-bump.mjs && git add manifest.json versions.json"
+	},
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"security",
+		"evidence",
+		"pentest"
+	],
+	"author": "Donald",
+	"license": "MIT",
+	"devDependencies": {
+		"@types/node": "^20.11.0",
+		"builtin-modules": "^3.3.0",
+		"esbuild": "0.17.3",
+		"obsidian": "latest",
+		"tsx": "^4.19.0",
+		"typescript": "^5.4.0"
+	}
+}
