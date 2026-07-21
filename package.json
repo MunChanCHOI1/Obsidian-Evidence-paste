@@ -1,6 +1,6 @@
 {
 	"name": "obsidian-evidence-paste",
-	"version": "0.1.0",
+	"version": "0.4.0",
 	"description": "Paste screenshots as security-report evidence in Obsidian.",
 	"main": "main.js",
 	"scripts": {

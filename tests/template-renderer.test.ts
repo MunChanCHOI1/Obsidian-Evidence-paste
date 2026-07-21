@@ -3,10 +3,15 @@ import assert from "node:assert/strict";
 import {
 	buildDefaultTemplate,
 	buildImageEmbed,
+	buildReconVars,
 	buildTemplateVars,
+	RECON_CALLOUT_TYPE,
+	renderBasicBlock,
 	renderEvidenceBlock,
+	renderReconBlock,
 	renderTemplate,
 	type EvidenceRenderContext,
+	type ReconRenderContext,
 } from "../src/evidence/template-renderer";
 
 function ctx(overrides: Partial<EvidenceRenderContext> = {}): EvidenceRenderContext {
@@ -103,4 +108,86 @@ test("renderEvidenceBlock uses a non-empty custom template verbatim", () => {
 test("renderEvidenceBlock falls back to default when the custom template is blank", () => {
 	const block = renderEvidenceBlock(ctx({ customTemplate: "   \n  " }));
 	assert.ok(block.includes("### 증적 EV-001"));
+});
+
+/* ---------------- 정찰 (recon) ---------------- */
+
+function reconCtx(overrides: Partial<ReconRenderContext> = {}): ReconRenderContext {
+	return {
+		reconId: "RC-001",
+		imagePath: "attachments/evidence/RC-001.png",
+		imageName: "RC-001.png",
+		imageMaxWidth: 0,
+		insertHeading: true,
+		includeImage: true,
+		calloutType: "",
+		target: "10.0.0.5",
+		command: "nmap -sV 10.0.0.5",
+		finding: "22/tcp open ssh",
+		pending: "직접 작성 필요",
+		placeholderId: "pid",
+		...overrides,
+	};
+}
+
+test("buildReconVars fills fields and defaults the callout type", () => {
+	const vars = buildReconVars(reconCtx());
+	assert.equal(vars.reconId, "RC-001");
+	assert.equal(vars.calloutType, RECON_CALLOUT_TYPE);
+	assert.equal(vars.target, "10.0.0.5");
+	assert.equal(vars.finding, "22/tcp open ssh");
+	assert.equal(vars.imageEmbed, "![[attachments/evidence/RC-001.png]]");
+});
+
+test("buildReconVars uses pending for blank fields", () => {
+	const vars = buildReconVars(reconCtx({ target: "", command: "  ", finding: "" }));
+	assert.equal(vars.target, "직접 작성 필요");
+	assert.equal(vars.finding, "직접 작성 필요");
+	assert.ok(vars.commandBlock.includes("직접 작성 필요"));
+});
+
+test("renderReconBlock renders heading + embed + light callout", () => {
+	const block = renderReconBlock(reconCtx({ imageMaxWidth: 480 }));
+	assert.ok(block.includes("### 정찰 RC-001"));
+	assert.ok(block.includes("![[attachments/evidence/RC-001.png|480]]"));
+	assert.ok(block.includes("> [!info]+ 정찰 RC-001"));
+	assert.ok(block.includes("> **대상**\n> 10.0.0.5"));
+	// Command fenced AND inside the callout (each line prefixed with "> ").
+	assert.ok(block.includes("> ```text\n> nmap -sV 10.0.0.5\n> ```"));
+	assert.ok(block.includes("> **발견**\n> 22/tcp open ssh"));
+});
+
+test("renderReconBlock omits the heading when disabled", () => {
+	const block = renderReconBlock(reconCtx({ insertHeading: false }));
+	assert.ok(!block.includes("### 정찰"));
+	assert.ok(block.includes("> [!info]+ 정찰 RC-001"));
+});
+
+test("renderReconBlock re-prefixes multi-line findings inside the callout", () => {
+	const block = renderReconBlock(reconCtx({ finding: "80/tcp open http\n443/tcp open https" }));
+	assert.ok(block.includes("> **발견**\n> 80/tcp open http\n> 443/tcp open https"));
+});
+
+/* ---------------- 기본 (basic) ---------------- */
+
+test("renderBasicBlock renders embed plus an italic caption", () => {
+	const block = renderBasicBlock({
+		imagePath: "attachments/evidence/IMG_1.png",
+		imageName: "IMG_1.png",
+		imageMaxWidth: 0,
+		includeImage: true,
+		caption: "로그인 페이지",
+	});
+	assert.equal(block, "![[attachments/evidence/IMG_1.png]]\n*로그인 페이지*");
+});
+
+test("renderBasicBlock omits the caption line when blank", () => {
+	const block = renderBasicBlock({
+		imagePath: "a.png",
+		imageName: "a.png",
+		imageMaxWidth: 480,
+		includeImage: true,
+		caption: "   ",
+	});
+	assert.equal(block, "![[a.png|480]]");
 });

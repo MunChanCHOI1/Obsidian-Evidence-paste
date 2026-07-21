@@ -172,9 +172,47 @@ declare module "obsidian" {
 		addSettingTab(settingTab: PluginSettingTab): void;
 		registerEvent(eventRef: EventRef): void;
 		addStatusBarItem(): HTMLElement;
+		addRibbonIcon(
+			icon: string,
+			title: string,
+			callback: (evt: MouseEvent) => any
+		): HTMLElement;
 		loadData(): Promise<any>;
 		saveData(data: any): Promise<void>;
 	}
+
+	export class Menu {
+		addItem(cb: (item: MenuItem) => any): this;
+		addSeparator(): this;
+		showAtMouseEvent(evt: MouseEvent): this;
+		showAtPosition(position: { x: number; y: number }): this;
+		hide(): this;
+	}
+
+	export class MenuItem {
+		setTitle(title: string | DocumentFragment): this;
+		setIcon(icon: string | null): this;
+		setChecked(checked: boolean | null): this;
+		setDisabled(disabled: boolean): this;
+		setSection(section: string): this;
+		setIsLabel(isLabel: boolean): this;
+		onClick(callback: (evt: MouseEvent | KeyboardEvent) => any): this;
+	}
+
+	export abstract class Modal {
+		app: App;
+		contentEl: HTMLElement;
+		titleEl: HTMLElement;
+		modalEl: HTMLElement;
+		constructor(app: App);
+		open(): void;
+		close(): void;
+		onOpen(): void;
+		onClose(): void;
+		setTitle(title: string): this;
+	}
+
+	export function setIcon(parent: HTMLElement, iconId: string): void;
 
 	export abstract class PluginSettingTab {
 		app: App;

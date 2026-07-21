@@ -1,9 +1,9 @@
 {
 	"id": "obsidian-evidence-paste",
 	"name": "Evidence Paste",
-	"version": "0.1.0",
+	"version": "0.4.0",
 	"minAppVersion": "1.4.0",
-	"description": "Paste screenshots as security-report evidence: automatic file naming, evidence numbering, and description callouts, with optional local/cloud AI vision analysis.",
+	"description": "Paste screenshots and payloads into security notes with a browser-extension-style toggle and four modes: 정찰(recon), 증적(evidence), 기본(basic caption), 페이로드(HTTP/text capture). Optional screenshot redaction, project-wide evidence numbering, per-project image folders, automatic file naming, and structured callouts.",
 	"author": "Donald",
 	"authorUrl": "",
 	"isDesktopOnly": true
