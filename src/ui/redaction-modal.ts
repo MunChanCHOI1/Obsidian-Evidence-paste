@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Setting } from "obsidian";
+import { App, ButtonComponent, Modal, Notice, Setting } from "obsidian";
 import {
 	Point,
 	Rect,
@@ -19,8 +19,14 @@ import {
  *
  * The modal resolves with:
  *   - { buffer, mime } when the user saves (redacted PNG, or the untouched
- *     original bytes if they chose "원본 그대로"),
+ *     original bytes if they explicitly chose "원본 그대로"),
  *   - null when the user cancels, so the caller skips saving that image.
+ *
+ * Fail-closed: the unredacted original is written ONLY when the user explicitly
+ * asks for it. If the image cannot be loaded or the redacted PNG cannot be
+ * produced, nothing is saved — the modal stays open (export failure) or skips
+ * the image (load failure). The screenshot is still on the clipboard, so the
+ * user can simply paste again; nothing is lost by refusing to save.
  */
 
 export interface RedactedImage {
@@ -30,6 +36,8 @@ export interface RedactedImage {
 
 const FILL = "#000000";
 const PREVIEW_FILL = "rgba(0, 0, 0, 0.45)";
+const ORIGINAL_LABEL = "원본 그대로";
+const ORIGINAL_CONFIRM_LABEL = "가린 영역 무시하고 원본 저장";
 
 class RedactionModal extends Modal {
 	private readonly rects: Rect[] = [];
@@ -40,6 +48,9 @@ class RedactionModal extends Modal {
 	private dragStart: Point | null = null;
 	private dragCurrent: Point | null = null;
 	private resolved = false;
+	private saving = false;
+	private originalArmed = false;
+	private originalButton: ButtonComponent | null = null;
 	private countEl: HTMLElement | null = null;
 
 	constructor(
@@ -83,11 +94,12 @@ class RedactionModal extends Modal {
 					this.updateCount();
 				})
 			)
-			.addButton((b) =>
-				b.setButtonText("원본 그대로").onClick(() => {
-					void this.saveOriginal();
-				})
-			)
+			.addButton((b) => {
+				this.originalButton = b;
+				b.setButtonText(ORIGINAL_LABEL).onClick(() => {
+					this.onOriginalClick();
+				});
+			})
 			.addButton((b) =>
 				b
 					.setButtonText("적용 후 저장")
@@ -113,9 +125,12 @@ class RedactionModal extends Modal {
 			this.redraw();
 		};
 		img.onerror = () => {
-			// Never lose the paste: fall back to saving the original untouched.
-			new Notice("이미지를 열 수 없어 원본을 그대로 저장합니다.");
-			void this.saveOriginal();
+			// Fail closed: we cannot show the image, so the user cannot redact it.
+			// Skip it rather than silently writing unredacted pixels to the vault.
+			new Notice(
+				"이미지를 열 수 없어 저장하지 않았습니다. 클립보드에 그대로 있으니 다시 붙여넣어 주세요."
+			);
+			this.finish(null);
 		};
 		img.src = this.objectUrl;
 	}
@@ -192,29 +207,84 @@ class RedactionModal extends Modal {
 		if (this.countEl) {
 			this.countEl.setText(`가린 영역: ${this.rects.length}개`);
 		}
+		// Changing the boxes invalidates a pending "save original" confirmation.
+		this.disarmOriginal();
+	}
+
+	/**
+	 * "원본 그대로" discards every box the user drew. With boxes present it takes
+	 * a second click to confirm, so a misclick cannot leak what was masked.
+	 */
+	private onOriginalClick(): void {
+		if (this.rects.length > 0 && !this.originalArmed) {
+			this.originalArmed = true;
+			this.originalButton?.setButtonText(ORIGINAL_CONFIRM_LABEL).setWarning();
+			return;
+		}
+		void this.saveOriginal();
+	}
+
+	private disarmOriginal(): void {
+		if (!this.originalArmed) {
+			return;
+		}
+		this.originalArmed = false;
+		this.originalButton?.setButtonText(ORIGINAL_LABEL);
+		this.originalButton?.buttonEl.removeClass("mod-warning");
 	}
 
 	private async saveRedacted(): Promise<void> {
+		if (this.saving || this.resolved) {
+			return;
+		}
 		const canvas = this.canvas;
-		if (!canvas) {
-			this.finish(null);
+		if (!canvas || !this.img) {
+			// Image not loaded yet: exporting now would save a blank canvas.
+			new Notice("이미지를 아직 불러오는 중입니다. 잠시 후 다시 시도해 주세요.");
 			return;
 		}
-		const blob = await new Promise<Blob | null>((resolve) => {
-			canvas.toBlob((b) => resolve(b), "image/png");
-		});
-		if (!blob) {
-			new Notice("마스킹 이미지를 생성하지 못해 원본을 저장합니다.");
-			await this.saveOriginal();
-			return;
+		this.saving = true;
+		try {
+			// Drop any half-drawn (semi-transparent) preview so only the final,
+			// fully opaque boxes are burned into the export.
+			this.dragStart = null;
+			this.dragCurrent = null;
+			this.redraw();
+			const blob = await new Promise<Blob | null>((resolve) => {
+				canvas.toBlob((b) => resolve(b), "image/png");
+			});
+			if (!blob) {
+				throw new Error("canvas.toBlob returned null");
+			}
+			const buffer = await blob.arrayBuffer();
+			this.finish({ buffer, mime: "image/png" });
+		} catch (err) {
+			// Fail closed: never substitute the unredacted original. Keep the
+			// editor open so the user can retry, explicitly choose the original,
+			// or cancel.
+			console.error("[evidence-paste] redaction export failed", err);
+			new Notice(
+				"마스킹 이미지를 만들지 못해 아무것도 저장하지 않았습니다. 다시 시도하거나 취소해 주세요."
+			);
+		} finally {
+			this.saving = false;
 		}
-		const buffer = await blob.arrayBuffer();
-		this.finish({ buffer, mime: "image/png" });
 	}
 
 	private async saveOriginal(): Promise<void> {
-		const buffer = await this.file.arrayBuffer();
-		this.finish({ buffer, mime: this.file.type });
+		if (this.saving || this.resolved) {
+			return;
+		}
+		this.saving = true;
+		try {
+			const buffer = await this.file.arrayBuffer();
+			this.finish({ buffer, mime: this.file.type });
+		} catch (err) {
+			console.error("[evidence-paste] reading original image failed", err);
+			new Notice("원본 이미지를 읽지 못해 저장하지 않았습니다.");
+		} finally {
+			this.saving = false;
+		}
 	}
 
 	private finish(result: RedactedImage | null): void {
