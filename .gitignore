@@ -27,3 +27,6 @@ pnpm-debug.log*
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# obsidian plugin runtime settings (may contain real targets/projects)
+data.json
